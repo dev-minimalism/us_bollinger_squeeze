@@ -39,6 +39,60 @@ class RealTimeVolatilityMonitor:
     self.telegram_bot_token = telegram_bot_token
     self.telegram_chat_id = telegram_chat_id
 
+    # Ticker-to-Korean-name mapping
+    self.ticker_to_korean = {
+      'AAPL': '애플',
+      'MSFT': '마이크로소프트',
+      'GOOGL': '구글',
+      'AMZN': '아마존',
+      'NVDA': '엔비디아',
+      'META': '메타',
+      'TSLA': '테슬라',
+      'BRK-B': '버크셔 해서웨이',
+      'AVGO': '브로드컴',
+      'LLY': '일라이 릴리',
+      'JPM': 'JP모건 체이스',
+      'UNH': '유나이티드헬스',
+      'XOM': '엑슨모빌',
+      'V': '비자',
+      'PG': '프록터앤갬블',
+      'JNJ': '존슨앤존슨',
+      'MA': '마스터카드',
+      'HD': '홈디포',
+      'CVX': '쉐브론',
+      'MRK': '머크',
+      'ABBV': '애브비',
+      'KO': '코카콜라',
+      'ADBE': '어도비',
+      'PEP': '펩시코',
+      'COST': '코스트코',
+      'WMT': '월마트',
+      'BAC': '뱅크오브아메리카',
+      'CRM': '세일즈포스',
+      'TMO': '써모 피셔 사이언티픽',
+      'NFLX': '넷플릭스',
+      'ACN': '액센추어',
+      'LIN': '린데',
+      'MCD': '맥도날드',
+      'ABT': '애보트',
+      'CSCO': '시스코',
+      'AMD': 'AMD',
+      'PM': '필립모리스',
+      'TXN': '텍사스 인스트루먼츠',
+      'DHR': '다나허',
+      'DIS': '디즈니',
+      'INTC': '인텔',
+      'VZ': '버라이즌',
+      'WFC': '웰스파고',
+      'COP': '코노코필립스',
+      'BMY': '브리스톨마이어스스큅',
+      'NOW': '서비스나우',
+      'CAT': '캐터필러',
+      'NEE': '넥스트에라 에너지',
+      'UPS': 'UPS',
+      'RTX': 'RTX'
+    }
+
     # 모니터링 대상 종목 (미국 시총 50위 전체)
     self.watchlist = [
       'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'AVGO',
@@ -253,6 +307,7 @@ class RealTimeVolatilityMonitor:
     """Format analysis message for Telegram command (개선된 버전)."""
     try:
       symbol = signals['symbol']
+      korean_name = self.ticker_to_korean.get(symbol, 'Unknown')  # Get Korean name
       price = signals['price']
       rsi = signals['rsi']
       bb_pos = signals['bb_position']
@@ -291,7 +346,7 @@ class RealTimeVolatilityMonitor:
           signals_list) if signals_list else "📊 No Signals"
 
       message = (
-        f"📈 <b>Analysis: {symbol}</b>\n\n"
+        f"📈 <b>Analysis: {symbol} ({korean_name})</b>\n\n"
         f"💰 <b>Price:</b> ${price:.2f}\n"
         f"📊 <b>RSI:</b> {rsi:.1f} ({rsi_status})\n"
         f"📍 <b>BB Position:</b> {bb_pos:.2f} ({bb_status})\n"
@@ -670,6 +725,7 @@ class RealTimeVolatilityMonitor:
   def format_alert_message(self, signals: Dict, signal_type: str) -> str:
     """알림 메시지 포맷팅"""
     symbol = signals['symbol']
+    korean_name = self.ticker_to_korean.get(symbol, 'Unknown')  # Get Korean name, default to 'Unknown' if not found
     price = signals['price']
     rsi = signals['rsi']
     bb_pos = signals['bb_position']
@@ -678,7 +734,7 @@ class RealTimeVolatilityMonitor:
     if signal_type == 'buy':
       message = f"""🚀 <b>매수 신호 발생!</b>
             
-종목: <b>{symbol}</b>
+종목: <b>{symbol} ({korean_name})</b>
 현재가: <b>${price:.2f}</b>
 RSI: <b>{rsi:.1f}</b>
 BB 위치: <b>{bb_pos:.2f}</b>
@@ -690,7 +746,7 @@ BB 위치: <b>{bb_pos:.2f}</b>
     elif signal_type == 'sell_50':
       message = f"""💡 <b>50% 익절 신호!</b>
             
-종목: <b>{symbol}</b>
+종목: <b>{symbol} ({korean_name})</b>
 현재가: <b>${price:.2f}</b>
 BB 위치: <b>{bb_pos:.2f}</b>
 시간: {timestamp}
@@ -700,7 +756,7 @@ BB 위치: <b>{bb_pos:.2f}</b>
     elif signal_type == 'sell_all':
       message = f"""🔴 <b>전량 매도 신호!</b>
             
-종목: <b>{symbol}</b>
+종목: <b>{symbol} ({korean_name})</b>
 현재가: <b>${price:.2f}</b>
 BB 위치: <b>{bb_pos:.2f}</b>
 시간: {timestamp}
