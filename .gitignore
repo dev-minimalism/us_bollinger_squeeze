@@ -1,0 +1,63 @@
+# 백테스트 출력 파일들
+output_files/
+!output_files/.gitkeep
+!output_files/charts/.gitkeep
+!output_files/results/.gitkeep
+!output_files/reports/.gitkeep
+
+# 기존 출력 파일들 (혹시 남아있는 것들)
+*.csv
+*.png
+charts/
+results/
+reports/
+backtest_results_*.csv
+investment_report_*.txt
+portfolio_backtest_*.csv
+*_analysis_*.png
+*_performance_*.png
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+
+/.venv
+.idea
+/trading_monitor.log
+/venv/
