@@ -39,8 +39,8 @@ def setup_korean_font():
     if system == "Windows":
       font_candidates = [
         'C:/Windows/Fonts/malgun.ttf',  # 맑은 고딕
-        'C:/Windows/Fonts/gulim.ttc',  # 굴림
-        'C:/Windows/Fonts/batang.ttc'  # 바탕
+        'C:/Windows/Fonts/gulim.ttc',   # 굴림
+        'C:/Windows/Fonts/batang.ttc'   # 바탕
       ]
       font_names = ['Malgun Gothic', 'Gulim', 'Batang', 'Arial Unicode MS']
 
@@ -50,8 +50,7 @@ def setup_korean_font():
         '/System/Library/Fonts/AppleGothic.ttf',
         '/Library/Fonts/NanumGothic.ttf'
       ]
-      font_names = ['Apple SD Gothic Neo', 'AppleGothic', 'NanumGothic',
-                    'Arial Unicode MS']
+      font_names = ['Apple SD Gothic Neo', 'AppleGothic', 'NanumGothic', 'Arial Unicode MS']
 
     else:  # Linux
       font_candidates = [
@@ -67,7 +66,8 @@ def setup_korean_font():
       if os.path.exists(font_path):
         try:
           # 폰트 파일을 matplotlib에 등록
-          fm.fontManager.addfont(font_path)
+          if hasattr(fm.fontManager, 'addfont'):
+            fm.fontManager.addfont(font_path)
           prop = fm.FontProperties(fname=font_path)
           plt.rcParams['font.family'] = prop.get_name()
           font_found = True
@@ -92,22 +92,26 @@ def setup_korean_font():
     # 3. 기본 대체 폰트 설정
     if not font_found:
       if system == "Windows":
-        plt.rcParams['font.family'] = ['Arial Unicode MS', 'DejaVu Sans',
-                                       'Arial']
+        plt.rcParams['font.family'] = ['Arial Unicode MS', 'DejaVu Sans', 'Arial']
       elif system == "Darwin":
-        plt.rcParams['font.family'] = ['Arial Unicode MS', 'Helvetica',
-                                       'DejaVu Sans']
+        plt.rcParams['font.family'] = ['Arial Unicode MS', 'Helvetica', 'DejaVu Sans']
       else:
-        plt.rcParams['font.family'] = ['DejaVu Sans', 'Liberation Sans',
-                                       'Arial']
+        plt.rcParams['font.family'] = ['DejaVu Sans', 'Liberation Sans', 'Arial']
 
       print("⚠️ 한글 폰트를 찾을 수 없어 기본 폰트를 사용합니다.")
 
     # 마이너스 기호 깨짐 방지
     plt.rcParams['axes.unicode_minus'] = False
 
-    # 폰트 캐시 갱신
-    fm._rebuild()
+    # 폰트 캐시 갱신 (안전하게)
+    try:
+      if hasattr(fm, '_rebuild'):
+        fm._rebuild()
+      elif hasattr(fm.fontManager, 'findfont'):
+        # 폰트 매니저 재초기화
+        fm.fontManager.__init__()
+    except Exception as e:
+      print(f"⚠️ 폰트 캐시 갱신 건너뜀: {e}")
 
     return font_found
 
@@ -187,42 +191,47 @@ class VolatilityBollingerBacktest:
           self.reports_dir = base_dir
 
   def _setup_parameters(self, strategy_mode: str):
-    """전략 매개변수 설정 (모드별)"""
+    """전략 매개변수 설정 (볼린저 스퀴즈 최적화)"""
     self.bb_period = 20
     self.bb_std_multiplier = 2.0
     self.rsi_period = 14
-    self.volatility_lookback = 50
+    self.volatility_lookback = 20  # 더 짧게 조정
     self.volatility_threshold = 0.2
 
     if strategy_mode == "aggressive":
-      # 공격적 전략: 더 많은 매매 기회
-      self.rsi_overbought = 60  # 낮춤 (더 빨리 매수)
-      self.bb_sell_threshold = 0.7  # 낮춤 (더 빨리 50% 익절)
-      self.bb_sell_all_threshold = 0.2  # 높임 (덜 빨리 전량 매도)
-      print("🔥 공격적 전략: 더 많은 매매 기회, 높은 수익 추구")
+      # 공격적: 더 빠른 진입
+      self.rsi_upper = 80
+      self.rsi_lower = 45
+      self.volume_threshold = 1.1  # 거래량 10% 증가면 진입
+      self.bb_sell_threshold = 0.8
+      self.bb_sell_all_threshold = 0.2
+      print("🔥 공격적 전략: 빠른 브레이크아웃 감지")
 
     elif strategy_mode == "balanced":
-      # 균형 전략: 적당한 매매
-      self.rsi_overbought = 65
-      self.bb_sell_threshold = 0.75
+      # 균형: 표준 설정
+      self.rsi_upper = 75
+      self.rsi_lower = 50
+      self.volume_threshold = 1.2
+      self.bb_sell_threshold = 0.85
       self.bb_sell_all_threshold = 0.15
-      print("⚖️ 균형 전략: 적당한 위험과 수익")
+      print("⚖️ 균형 전략: 안정적 브레이크아웃 확인")
 
     else:  # conservative
-      # 보수적 전략: 기존 설정
-      self.rsi_overbought = 70
-      self.bb_sell_threshold = 0.8
+      # 보수적: 확실한 신호만
+      self.rsi_upper = 70
+      self.rsi_lower = 55
+      self.volume_threshold = 1.3  # 거래량 30% 증가 필요
+      self.bb_sell_threshold = 0.9
       self.bb_sell_all_threshold = 0.1
-      print("🛡️ 보수적 전략: 안전 우선, 신중한 매매")
+      print("🛡️ 보수적 전략: 강한 브레이크아웃만 포착")
 
   # ===================================================================================
   # 기술적 지표 계산
   # ===================================================================================
 
   def calculate_technical_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
-    """기술적 지표 계산"""
-    if len(data) < max(self.bb_period, self.rsi_period,
-                       self.volatility_lookback):
+    """기술적 지표 계산 (수정된 볼린저 스퀴즈 전략)"""
+    if len(data) < max(self.bb_period, self.rsi_period, self.volatility_lookback):
       return data
 
     # 볼린저 밴드
@@ -234,11 +243,8 @@ class VolatilityBollingerBacktest:
     # 밴드폭 (변동성 지표)
     data['Band_Width'] = (data['Upper_Band'] - data['Lower_Band']) / data['SMA']
 
-    # 변동성 압축 신호
-    data['Volatility_Squeeze'] = (
-        data['Band_Width'] < data['Band_Width'].rolling(
-        self.volatility_lookback).quantile(self.volatility_threshold)
-    )
+    # 변동성 압축 신호 (최근 20일 중 최소값과 비교)
+    data['BB_Squeeze'] = data['Band_Width'] < data['Band_Width'].rolling(20).min() * 1.1
 
     # 볼린저 밴드 위치 (0~1)
     data['BB_Position'] = (data['Close'] - data['Lower_Band']) / (
@@ -251,12 +257,25 @@ class VolatilityBollingerBacktest:
     rs = gain / loss
     data['RSI'] = 100 - (100 / (1 + rs))
 
-    # 매매 신호 생성 (개선된 버전)
-    data['Buy_Signal'] = (data['RSI'] > self.rsi_overbought) & (
-      data['Volatility_Squeeze'])
-    data['Sell_50_Signal'] = (data['BB_Position'] >= self.bb_sell_threshold) | (
-        abs(data['BB_Position'] - 0.5) <= 0.1)
-    data['Sell_All_Signal'] = data['BB_Position'] <= self.bb_sell_all_threshold
+    # 가격 모멘텀 (스퀴즈 브레이크아웃 감지)
+    data['Price_Change'] = data['Close'].pct_change()
+    data['Volume_MA'] = data['Volume'].rolling(20).mean() if 'Volume' in data.columns else 1
+    data['Volume_Ratio'] = data['Volume'] / data['Volume_MA'] if 'Volume' in data.columns else 1
+
+    # 수정된 매매 신호
+    # 매수: 스퀴즈 상태에서 상단 밴드 돌파 + 거래량 증가
+    data['Buy_Signal'] = (
+        data['BB_Squeeze'] &
+        (data['Close'] > data['Upper_Band']) &
+        (data['Volume_Ratio'] > 1.2) &  # 거래량 20% 증가
+        (data['RSI'] > 50) & (data['RSI'] < 80)  # RSI 중립~과매수 초기
+    )
+
+    # 50% 익절: BB 상단 근처
+    data['Sell_50_Signal'] = data['BB_Position'] >= 0.85
+
+    # 전량 매도: BB 하단 근처 또는 손절
+    data['Sell_All_Signal'] = (data['BB_Position'] <= 0.15) | (data['RSI'] < 30)
 
     return data
 
@@ -2034,8 +2053,8 @@ def main():
     backtest = VolatilityBollingerBacktest(initial_capital=10000)
 
   # 백테스트 기간 설정
-  start_date = "2022-01-01"
-  end_date = "2024-01-01"
+  start_date = "2021-01-01"
+  end_date = "2025-07-31"
 
   print(f"📅 분석 기간: {start_date} ~ {end_date}")
 

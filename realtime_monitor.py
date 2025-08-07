@@ -307,7 +307,8 @@ class RealTimeVolatilityMonitor:
     """Format analysis message for Telegram command (개선된 버전)."""
     try:
       symbol = signals['symbol']
-      korean_name = self.ticker_to_korean.get(symbol, 'Unknown')  # Get Korean name
+      korean_name = self.ticker_to_korean.get(symbol,
+                                              'Unknown')  # Get Korean name
       price = signals['price']
       rsi = signals['rsi']
       bb_pos = signals['bb_position']
@@ -366,16 +367,14 @@ class RealTimeVolatilityMonitor:
       return f"❌ Error formatting analysis for {signals.get('symbol', 'unknown')}"
 
   def send_telegram_alert(self, message: str, parse_mode: str = 'HTML'):
-    """텔레그램 알림 전송"""
+    """텔레그램 알림 전송 (429 에러 처리 포함)"""
     if not self.telegram_bot_token or not self.telegram_chat_id:
-      self.logger.info(
-          f"Telegram Alert (not sent, no token/chat_id): {message}")
+      self.logger.info(f"Telegram Alert (not sent, no token/chat_id): {message}")
       return False
 
     # Sanitize message to prevent invalid HTML tags
     message = re.sub(r'<symbol>', '<b>', message, flags=re.IGNORECASE)
     message = re.sub(r'</symbol>', '</b>', message, flags=re.IGNORECASE)
-    self.logger.debug(f"Sending Telegram message: {message}")
 
     url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
     payload = {
@@ -384,17 +383,39 @@ class RealTimeVolatilityMonitor:
       'parse_mode': parse_mode
     }
 
-    try:
-      response = requests.post(url, data=payload, timeout=10)
-      if response.status_code == 200:
-        self.logger.info("텔레그램 알림 전송 성공")
-        return True
-      else:
-        self.logger.error(f"텔레그램 전송 실패: {response.text}")
+    max_retries = 3
+    for attempt in range(max_retries):
+      try:
+        response = requests.post(url, data=payload, timeout=10)
+
+        if response.status_code == 200:
+          self.logger.info("텔레그램 알림 전송 성공")
+          return True
+        elif response.status_code == 429:
+          # 429 에러 처리
+          retry_data = response.json()
+          retry_after = retry_data.get('parameters', {}).get('retry_after', 20)
+
+          self.logger.warning(f"텔레그램 429 에러: {retry_after}초 후 재시도 (시도 {attempt + 1}/{max_retries})")
+
+          if attempt < max_retries - 1:  # 마지막 시도가 아니면
+            time.sleep(retry_after + 1)  # 여유분 1초 추가
+            continue
+          else:
+            self.logger.error(f"텔레그램 전송 최종 실패: 429 에러")
+            return False
+        else:
+          self.logger.error(f"텔레그램 전송 실패: {response.text}")
+          return False
+
+      except Exception as e:
+        self.logger.error(f"텔레그램 전송 오류: {e}")
+        if attempt < max_retries - 1:
+          time.sleep(2 ** attempt)  # 지수적 백오프
+          continue
         return False
-    except Exception as e:
-      self.logger.error(f"텔레그램 전송 오류: {e}")
-      return False
+
+    return False
 
   def send_heartbeat(self):
     """Heartbeat 메시지 전송 (시간 정보 개선)"""
@@ -672,24 +693,49 @@ class RealTimeVolatilityMonitor:
       return None
 
   def check_signals(self, symbol: str) -> Dict:
-    """신호 확인 (개선된 에러 처리)"""
+    """신호 확인 (볼린저 스퀴즈 전략)"""
     try:
       data = self.get_stock_data(symbol)
-      if data is None or len(data) < self.volatility_lookback:
-        self.logger.warning(f"Insufficient data for {symbol}")
+      if data is None or len(data) < 50:  # 충분한 데이터 필요
         return {}
 
-      data = self.calculate_indicators(data)
-      if data is None or data.empty:
-        self.logger.warning(f"Failed to calculate indicators for {symbol}")
-        return {}
+      # 볼린저 밴드 계산
+      data['SMA'] = data['Close'].rolling(20).mean()
+      data['STD'] = data['Close'].rolling(20).std()
+      data['Upper_Band'] = data['SMA'] + (data['STD'] * 2.0)
+      data['Lower_Band'] = data['SMA'] - (data['STD'] * 2.0)
+      data['Band_Width'] = (data['Upper_Band'] - data['Lower_Band']) / data[
+        'SMA']
+
+      # 스퀴즈 감지 (최근 20일 중 최소 밴드폭의 110% 이하)
+      data['BB_Squeeze'] = data['Band_Width'] < data['Band_Width'].rolling(
+        20).min() * 1.1
+      data['BB_Position'] = (data['Close'] - data['Lower_Band']) / (
+            data['Upper_Band'] - data['Lower_Band'])
+
+      # RSI
+      delta = data['Close'].diff()
+      gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+      loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+      rs = gain / loss
+      data['RSI'] = 100 - (100 / (1 + rs))
+
+      # 거래량 비율
+      data['Volume_MA'] = data['Volume'].rolling(
+        20).mean() if 'Volume' in data.columns else 1
+      data['Volume_Ratio'] = data['Volume'] / data[
+        'Volume_MA'] if 'Volume' in data.columns else 1
 
       latest = data.iloc[-1]
+      prev = data.iloc[-2] if len(data) > 1 else latest
 
-      # NaN 값 체크
-      if pd.isna(latest['RSI']) or pd.isna(latest['BB_Position']):
-        self.logger.warning(f"NaN values in indicators for {symbol}")
-        return {}
+      # 스퀴즈 브레이크아웃 감지
+      squeeze_breakout = (
+          prev['BB_Squeeze'] and  # 이전에 스퀴즈 상태였고
+          (latest['Close'] > latest['Upper_Band'] or  # 상단 돌파 또는
+           latest['Close'] < latest['Lower_Band']) and  # 하단 이탈
+          latest['Volume_Ratio'] > 1.2  # 거래량 증가
+      )
 
       signals = {
         'symbol': symbol,
@@ -697,10 +743,13 @@ class RealTimeVolatilityMonitor:
         'rsi': float(latest['RSI']),
         'bb_position': float(latest['BB_Position']),
         'band_width': float(latest['Band_Width']),
-        'volatility_squeeze': bool(latest['Volatility_Squeeze']),
-        'buy_signal': bool(latest['Buy_Signal']),
-        'sell_50_signal': bool(latest['Sell_50_Signal']),
-        'sell_all_signal': bool(latest['Sell_All_Signal']),
+        'bb_squeeze': bool(latest['BB_Squeeze']),
+        'volume_ratio': float(latest['Volume_Ratio']),
+        'squeeze_breakout': squeeze_breakout,
+        'buy_signal': squeeze_breakout and latest['Close'] > latest[
+          'Upper_Band'] and 50 < latest['RSI'] < 80,
+        'sell_50_signal': latest['BB_Position'] >= 0.85,
+        'sell_all_signal': latest['BB_Position'] <= 0.15 or latest['RSI'] < 30,
         'timestamp': latest.name
       }
 
@@ -723,48 +772,51 @@ class RealTimeVolatilityMonitor:
     return True
 
   def format_alert_message(self, signals: Dict, signal_type: str) -> str:
-    """알림 메시지 포맷팅"""
+    """알림 메시지 포맷팅 (볼린저 스퀴즈 전략)"""
     symbol = signals['symbol']
-    korean_name = self.ticker_to_korean.get(symbol, 'Unknown')  # Get Korean name, default to 'Unknown' if not found
+    korean_name = self.ticker_to_korean.get(symbol, 'Unknown')
     price = signals['price']
     rsi = signals['rsi']
     bb_pos = signals['bb_position']
+    volume_ratio = signals.get('volume_ratio', 1.0)
     timestamp = signals['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
 
     if signal_type == 'buy':
-      message = f"""🚀 <b>매수 신호 발생!</b>
+      direction = "상승" if bb_pos > 0.5 else "하락"
+      message = f"""🚀 <b>볼린저 스퀴즈 브레이크아웃!</b>
             
 종목: <b>{symbol} ({korean_name})</b>
 현재가: <b>${price:.2f}</b>
+브레이크아웃 방향: <b>{direction}</b>
 RSI: <b>{rsi:.1f}</b>
 BB 위치: <b>{bb_pos:.2f}</b>
-변동성 압축: <b>활성</b>
+거래량 비율: <b>{volume_ratio:.1f}x</b>
 시간: {timestamp}
 
-⚡ 변동성 폭파 예상 구간입니다!"""
+⚡ 변동성 압축 후 폭발적 움직임 시작!"""
 
     elif signal_type == 'sell_50':
       message = f"""💡 <b>50% 익절 신호!</b>
             
 종목: <b>{symbol} ({korean_name})</b>
 현재가: <b>${price:.2f}</b>
-BB 위치: <b>{bb_pos:.2f}</b>
+BB 위치: <b>{bb_pos:.2f}</b> (상단 근접)
 시간: {timestamp}
 
-📈 목표 수익구간에 도달했습니다."""
+📈 첫 번째 수익 구간 도달!"""
 
-    elif signal_type == 'sell_all':
+    else:  # sell_all
+      reason = "손절" if rsi < 30 else "하단 이탈"
       message = f"""🔴 <b>전량 매도 신호!</b>
             
 종목: <b>{symbol} ({korean_name})</b>
 현재가: <b>${price:.2f}</b>
+신호 사유: <b>{reason}</b>
 BB 위치: <b>{bb_pos:.2f}</b>
+RSI: <b>{rsi:.1f}</b>
 시간: {timestamp}
 
-⚠️ 손절 또는 나머지 익절 시점입니다."""
-
-    else:
-      message = f"알 수 없는 신호 타입: {signal_type}"
+⚠️ 추세 전환 또는 리스크 관리 시점!"""
 
     return message
 
@@ -880,10 +932,11 @@ BB 위치: <b>{bb_pos:.2f}</b>
     # Heartbeat 시작
     self.start_heartbeat()
 
-    # 시작 메시지 전송
+    # 시작 메시지 전송 (딜레이 추가)
     if self.telegram_bot_token:
+      time.sleep(2)  # 2초 대기
       start_message = f"""🤖 <b>Monitoring Started</b>
-
+        
 📊 Watching: {len(self.watchlist)} stocks (US Top 50)
 ⏰ Scan Interval: {scan_interval}s ({scan_interval // 60}min)
 💓 Heartbeat: Every hour
@@ -894,9 +947,9 @@ BB 위치: <b>{bb_pos:.2f}</b>
 💓 System status updates every hour
 
 📱 <b>Commands:</b>
-• /ticker &lt;symbol&gt; - Analyze any stock
-• /status - Show monitoring status
-• /start - Show help
+- /ticker &lt;symbol&gt; - Analyze any stock
+- /status - Show monitoring status
+- /start - Show help
 
 💡 <b>Example:</b> /ticker AAPL"""
 
@@ -1173,6 +1226,8 @@ BB 위치: <b>{bb_pos:.2f}</b>
 
   def test_telegram_connection(self):
     """텔레그램 연결 테스트"""
+    time.sleep(1)  # 1초 대기 후 테스트
+
     test_message = f"""🧪 <b>연결 테스트</b>
 
 텔레그램 봇이 정상적으로 작동합니다!
@@ -1181,7 +1236,7 @@ BB 위치: <b>{bb_pos:.2f}</b>
 ✅ 알림 수신 준비 완료
 💓 Heartbeat 기능 활성화됨
 🇰🇷 한국 시간 기준 미국 장시간 체크
-📬 Use /ticker <symbol> to analyze a stock (e.g., /ticker AAPL or /ticker aapl)"""
+📬 Use /ticker symbol to analyze a stock (e.g., /ticker AAPL)"""
 
     success = self.send_telegram_alert(test_message)
     if success:
