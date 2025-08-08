@@ -157,6 +157,27 @@ class RealTimeVolatilityMonitor:
         self.logger.error(f"❌ Telegram bot initialization failed: {e}")
         self.telegram_app = None
 
+    # 포지션 상태 관리 추가
+    self.positions = {}  # {symbol: {'status': 'none'|'holding', 'entry_price': float, 'entry_time': datetime}}
+
+  def get_position_status(self, symbol: str) -> str:
+    """포지션 상태 조회"""
+    return self.positions.get(symbol, {}).get('status', 'none')
+
+  def update_position(self, symbol: str, status: str, price: float = None):
+    """포지션 상태 업데이트"""
+    if symbol not in self.positions:
+      self.positions[symbol] = {}
+
+    self.positions[symbol]['status'] = status
+
+    if status == 'holding' and price:
+      self.positions[symbol]['entry_price'] = price
+      self.positions[symbol]['entry_time'] = datetime.now()
+    elif status == 'none':
+      self.positions[symbol].pop('entry_price', None)
+      self.positions[symbol].pop('entry_time', None)
+
   async def start_command(self, update, context):
     """Handle /start command."""
     try:
@@ -369,7 +390,8 @@ class RealTimeVolatilityMonitor:
   def send_telegram_alert(self, message: str, parse_mode: str = 'HTML'):
     """텔레그램 알림 전송 (429 에러 처리 포함)"""
     if not self.telegram_bot_token or not self.telegram_chat_id:
-      self.logger.info(f"Telegram Alert (not sent, no token/chat_id): {message}")
+      self.logger.info(
+        f"Telegram Alert (not sent, no token/chat_id): {message}")
       return False
 
     # Sanitize message to prevent invalid HTML tags
@@ -396,7 +418,8 @@ class RealTimeVolatilityMonitor:
           retry_data = response.json()
           retry_after = retry_data.get('parameters', {}).get('retry_after', 20)
 
-          self.logger.warning(f"텔레그램 429 에러: {retry_after}초 후 재시도 (시도 {attempt + 1}/{max_retries})")
+          self.logger.warning(
+            f"텔레그램 429 에러: {retry_after}초 후 재시도 (시도 {attempt + 1}/{max_retries})")
 
           if attempt < max_retries - 1:  # 마지막 시도가 아니면
             time.sleep(retry_after + 1)  # 여유분 1초 추가
@@ -693,13 +716,13 @@ class RealTimeVolatilityMonitor:
       return None
 
   def check_signals(self, symbol: str) -> Dict:
-    """신호 확인 (볼린저 스퀴즈 전략)"""
+    """수정된 신호 확인 (포지션 상태 고려)"""
     try:
       data = self.get_stock_data(symbol)
-      if data is None or len(data) < 50:  # 충분한 데이터 필요
+      if data is None or len(data) < 50:
         return {}
 
-      # 볼린저 밴드 계산
+      # 기존 기술적 지표 계산 (동일)
       data['SMA'] = data['Close'].rolling(20).mean()
       data['STD'] = data['Close'].rolling(20).std()
       data['Upper_Band'] = data['SMA'] + (data['STD'] * 2.0)
@@ -707,20 +730,17 @@ class RealTimeVolatilityMonitor:
       data['Band_Width'] = (data['Upper_Band'] - data['Lower_Band']) / data[
         'SMA']
 
-      # 스퀴즈 감지 (최근 20일 중 최소 밴드폭의 110% 이하)
       data['BB_Squeeze'] = data['Band_Width'] < data['Band_Width'].rolling(
         20).min() * 1.1
       data['BB_Position'] = (data['Close'] - data['Lower_Band']) / (
             data['Upper_Band'] - data['Lower_Band'])
 
-      # RSI
       delta = data['Close'].diff()
       gain = (delta.where(delta > 0, 0)).rolling(14).mean()
       loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
       rs = gain / loss
       data['RSI'] = 100 - (100 / (1 + rs))
 
-      # 거래량 비율
       data['Volume_MA'] = data['Volume'].rolling(
         20).mean() if 'Volume' in data.columns else 1
       data['Volume_Ratio'] = data['Volume'] / data[
@@ -731,11 +751,32 @@ class RealTimeVolatilityMonitor:
 
       # 스퀴즈 브레이크아웃 감지
       squeeze_breakout = (
-          prev['BB_Squeeze'] and  # 이전에 스퀴즈 상태였고
-          (latest['Close'] > latest['Upper_Band'] or  # 상단 돌파 또는
-           latest['Close'] < latest['Lower_Band']) and  # 하단 이탈
-          latest['Volume_Ratio'] > 1.2  # 거래량 증가
+          prev['BB_Squeeze'] and
+          (latest['Close'] > latest['Upper_Band'] or latest['Close'] < latest[
+            'Lower_Band']) and
+          latest['Volume_Ratio'] > 1.2
       )
+
+      # 현재 포지션 상태 확인
+      current_position = self.get_position_status(symbol)
+
+      # 포지션 상태에 따른 신호 생성
+      buy_signal = False
+      sell_50_signal = False
+      sell_all_signal = False
+
+      if current_position == 'none':
+        # 포지션이 없을 때만 매수 신호 생성
+        buy_signal = (
+            squeeze_breakout and
+            latest['Close'] > latest['Upper_Band'] and
+            50 < latest['RSI'] < 80
+        )
+
+      elif current_position == 'holding':
+        # 포지션이 있을 때만 매도 신호 생성
+        sell_50_signal = latest['BB_Position'] >= 0.85
+        sell_all_signal = latest['BB_Position'] <= 0.15 or latest['RSI'] < 30
 
       signals = {
         'symbol': symbol,
@@ -746,11 +787,11 @@ class RealTimeVolatilityMonitor:
         'bb_squeeze': bool(latest['BB_Squeeze']),
         'volume_ratio': float(latest['Volume_Ratio']),
         'squeeze_breakout': squeeze_breakout,
-        'buy_signal': squeeze_breakout and latest['Close'] > latest[
-          'Upper_Band'] and 50 < latest['RSI'] < 80,
-        'sell_50_signal': latest['BB_Position'] >= 0.85,
-        'sell_all_signal': latest['BB_Position'] <= 0.15 or latest['RSI'] < 30,
-        'timestamp': latest.name
+        'buy_signal': buy_signal,
+        'sell_50_signal': sell_50_signal,
+        'sell_all_signal': sell_all_signal,
+        'timestamp': latest.name,
+        'position_status': current_position  # 포지션 상태 추가
       }
 
       return signals
@@ -772,7 +813,7 @@ class RealTimeVolatilityMonitor:
     return True
 
   def format_alert_message(self, signals: Dict, signal_type: str) -> str:
-    """알림 메시지 포맷팅 (볼린저 스퀴즈 전략)"""
+    """수정된 알림 메시지 (포지션 정보 포함)"""
     symbol = signals['symbol']
     korean_name = self.ticker_to_korean.get(symbol, 'Unknown')
     price = signals['price']
@@ -780,70 +821,108 @@ class RealTimeVolatilityMonitor:
     bb_pos = signals['bb_position']
     volume_ratio = signals.get('volume_ratio', 1.0)
     timestamp = signals['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+    position_status = signals.get('position_status', 'none')
 
     if signal_type == 'buy':
       direction = "상승" if bb_pos > 0.5 else "하락"
       message = f"""🚀 <b>볼린저 스퀴즈 브레이크아웃!</b>
-            
+                
 종목: <b>{symbol} ({korean_name})</b>
 현재가: <b>${price:.2f}</b>
 브레이크아웃 방향: <b>{direction}</b>
 RSI: <b>{rsi:.1f}</b>
 BB 위치: <b>{bb_pos:.2f}</b>
 거래량 비율: <b>{volume_ratio:.1f}x</b>
+포지션 상태: <b>신규 진입</b>
 시간: {timestamp}
 
 ⚡ 변동성 압축 후 폭발적 움직임 시작!"""
 
     elif signal_type == 'sell_50':
+      # 포지션 정보 추가
+      entry_info = ""
+      if symbol in self.positions and 'entry_price' in self.positions[symbol]:
+        entry_price = self.positions[symbol]['entry_price']
+        profit_pct = ((price - entry_price) / entry_price) * 100
+        entry_info = f"\n진입가: <b>${entry_price:.2f}</b>\n수익률: <b>{profit_pct:+.1f}%</b>"
+
       message = f"""💡 <b>50% 익절 신호!</b>
-            
+                
 종목: <b>{symbol} ({korean_name})</b>
-현재가: <b>${price:.2f}</b>
+현재가: <b>${price:.2f}</b>{entry_info}
 BB 위치: <b>{bb_pos:.2f}</b> (상단 근접)
+포지션 상태: <b>50% 익절 실행</b>
 시간: {timestamp}
 
 📈 첫 번째 수익 구간 도달!"""
 
     else:  # sell_all
       reason = "손절" if rsi < 30 else "하단 이탈"
+
+      # 포지션 정보 추가
+      entry_info = ""
+      if symbol in self.positions and 'entry_price' in self.positions[symbol]:
+        entry_price = self.positions[symbol]['entry_price']
+        profit_pct = ((price - entry_price) / entry_price) * 100
+        entry_info = f"\n진입가: <b>${entry_price:.2f}</b>\n최종 수익률: <b>{profit_pct:+.1f}%</b>"
+
       message = f"""🔴 <b>전량 매도 신호!</b>
-            
+                
 종목: <b>{symbol} ({korean_name})</b>
-현재가: <b>${price:.2f}</b>
+현재가: <b>${price:.2f}</b>{entry_info}
 신호 사유: <b>{reason}</b>
 BB 위치: <b>{bb_pos:.2f}</b>
 RSI: <b>{rsi:.1f}</b>
+포지션 상태: <b>전량 청산</b>
 시간: {timestamp}
 
-⚠️ 추세 전환 또는 리스크 관리 시점!"""
+⚠️ 포지션 완전 종료!"""
 
     return message
 
+  def reset_all_positions(self):
+    """모든 포지션 초기화 (시스템 재시작시 사용)"""
+    self.positions = {}
+    self.logger.info("모든 포지션 상태가 초기화되었습니다.")
+
+  def get_positions_summary(self) -> str:
+    """현재 포지션 요약"""
+    holding_count = sum(
+        1 for pos in self.positions.values() if pos.get('status') == 'holding')
+    return f"현재 보유 포지션: {holding_count}개"
+
   def process_signals(self, signals: Dict) -> bool:
-    """신호 처리 및 알림"""
+    """수정된 신호 처리 (포지션 상태 업데이트 포함)"""
     if not signals:
       return False
 
     symbol = signals['symbol']
     alert_sent = False
 
+    # 매수 신호 처리
     if signals['buy_signal'] and self.should_send_alert(symbol, 'buy'):
       message = self.format_alert_message(signals, 'buy')
       if self.send_telegram_alert(message):
         self.logger.info(f"🚀 매수 신호 알림 전송: {symbol}")
         self.total_signals_sent += 1
         self.last_signal_time = datetime.now()
+
+        # 포지션 상태를 holding으로 변경
+        self.update_position(symbol, 'holding', signals['price'])
         alert_sent = True
 
+    # 50% 매도 신호 처리
     if signals['sell_50_signal'] and self.should_send_alert(symbol, 'sell_50'):
       message = self.format_alert_message(signals, 'sell_50')
       if self.send_telegram_alert(message):
         self.logger.info(f"💡 50% 매도 신호 알림 전송: {symbol}")
         self.total_signals_sent += 1
         self.last_signal_time = datetime.now()
+
+        # 포지션은 여전히 holding (50%만 매도)
         alert_sent = True
 
+    # 전량 매도 신호 처리
     if signals['sell_all_signal'] and self.should_send_alert(symbol,
                                                              'sell_all'):
       message = self.format_alert_message(signals, 'sell_all')
@@ -851,6 +930,9 @@ RSI: <b>{rsi:.1f}</b>
         self.logger.info(f"🔴 전량 매도 신호 알림 전송: {symbol}")
         self.total_signals_sent += 1
         self.last_signal_time = datetime.now()
+
+        # 포지션 상태를 none으로 변경
+        self.update_position(symbol, 'none')
         alert_sent = True
 
     return alert_sent
